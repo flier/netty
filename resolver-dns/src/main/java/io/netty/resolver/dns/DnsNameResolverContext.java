@@ -24,6 +24,10 @@ import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.handler.codec.CorruptedFrameException;
 import io.netty.handler.codec.dns.DefaultDnsQuestion;
 import io.netty.handler.codec.dns.DefaultDnsRecordDecoder;
+import io.netty.handler.codec.dns.DnsAAAARecord;
+import io.netty.handler.codec.dns.DnsARecord;
+import io.netty.handler.codec.dns.DnsCNameRecord;
+import io.netty.handler.codec.dns.DnsNsRecord;
 import io.netty.handler.codec.dns.DnsQuestion;
 import io.netty.handler.codec.dns.DnsRawRecord;
 import io.netty.handler.codec.dns.DnsRecord;
@@ -504,17 +508,25 @@ abstract class DnsNameResolverContext<T> {
     }
 
     private InetAddress parseAddress(DnsRecord r, String name) {
-        if (!(r instanceof DnsRawRecord)) {
-            return null;
-        }
-        final ByteBuf content = ((ByteBufHolder) r).content();
-        final int contentLen = content.readableBytes();
-        if (contentLen != INADDRSZ4 && contentLen != INADDRSZ6) {
-            return null;
-        }
+        final byte[] addrBytes;
 
-        final byte[] addrBytes = new byte[contentLen];
-        content.getBytes(content.readerIndex(), addrBytes);
+        if (r instanceof DnsARecord) {
+            addrBytes = ((DnsARecord) r).address().getAddress();
+        } else if (r instanceof DnsAAAARecord) {
+            addrBytes = ((DnsAAAARecord) r).address().getAddress();
+        } else {
+            if (!(r instanceof DnsRawRecord)) {
+                return null;
+            }
+            final ByteBuf content = ((ByteBufHolder) r).content();
+            final int contentLen = content.readableBytes();
+            if (contentLen != INADDRSZ4 && contentLen != INADDRSZ6) {
+                return null;
+            }
+
+            addrBytes = new byte[contentLen];
+            content.getBytes(content.readerIndex(), addrBytes);
+        }
 
         try {
             return InetAddress.getByAddress(
@@ -572,14 +584,20 @@ abstract class DnsNameResolverContext<T> {
                 continue;
             }
 
-            if (!(r instanceof DnsRawRecord)) {
-                continue;
-            }
+            String domainName;
 
-            final ByteBuf recordContent = ((ByteBufHolder) r).content();
-            final String domainName = decodeDomainName(recordContent);
-            if (domainName == null) {
-                continue;
+            if (r instanceof DnsCNameRecord) {
+                domainName = ((DnsCNameRecord) r).hostname();
+            } else {
+                if (!(r instanceof DnsRawRecord)) {
+                    continue;
+                }
+
+                final ByteBuf recordContent = ((ByteBufHolder) r).content();
+                domainName = decodeDomainName(recordContent);
+                if (domainName == null) {
+                    continue;
+                }
             }
 
             if (cnames == null) {
@@ -825,12 +843,12 @@ abstract class DnsNameResolverContext<T> {
         }
 
         void add(DnsRecord r) {
-            if (r.type() != DnsRecordType.NS || !(r instanceof DnsRawRecord)) {
+            if (r.type() != DnsRecordType.NS || !(r instanceof DnsRawRecord || r instanceof DnsNsRecord)) {
                 return;
             }
 
             // Only include servers that serve the correct domain.
-            if (questionName.length() <  r.name().length()) {
+            if (questionName.length() < r.name().length()) {
                 return;
             }
 
@@ -852,11 +870,17 @@ abstract class DnsNameResolverContext<T> {
                 return;
             }
 
-            final ByteBuf recordContent = ((ByteBufHolder) r).content();
-            final String domainName = decodeDomainName(recordContent);
-            if (domainName == null) {
-                // Could not be parsed, ignore.
-                return;
+            final String domainName;
+
+            if (r instanceof DnsNsRecord) {
+                domainName = ((DnsNsRecord) r).hostname();
+            } else {
+                final ByteBuf recordContent = ((ByteBufHolder) r).content();
+                domainName = decodeDomainName(recordContent);
+                if (domainName == null) {
+                    // Could not be parsed, ignore.
+                    return;
+                }
             }
 
             // We are only interested in preserving the nameservers which are the closest to our qName, so ensure
